@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.1.4
+
+- emoji 改用彩色 emoji 字体渲染（Noto Color Emoji，和原版用 Apple Color Emoji 一个路子）：
+  文本按 emoji / 非 emoji 分段换字体，emoji 用字体指定字号渲染后缩放到行高
+- 字体自动查找，找不到才退回原来的文字渲染
+
 ## 0.1.3
 
 - Unicode emoji 拆成 twemoji 图片内联排版，彩色显示（和 QQ 表情同一套机制）

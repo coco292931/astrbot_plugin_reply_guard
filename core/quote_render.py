@@ -92,8 +92,36 @@ _FONT_ROOTS = (
     "C:/Windows/Fonts",
 )
 
+EMOJI_FONT_SIZE = 109  # Noto Color Emoji 是位图字体，只有这个字号
+EMOJI_SCALE = 1.2
+
+_EMOJI_FONT_ROOTS = (
+    "/AstrBot/data/plugin_data/astrbot_plugin_reply_guard/fonts",
+    "/AstrBot/data/fonts",
+    "/AstrBot/data/koko/fonts",
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "/System/Library/Fonts",
+    "C:/Windows/Fonts",
+)
+_EMOJI_FONT_HINTS = ("notocoloremoji", "applecoloremoji", "seguiemj", "emoji")
+
+_EMOJI_CHAR_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U0001F1E6-\U0001F1FF"
+    "\U0001F3FB-\U0001F3FF"
+    "\u2600-\u27BF"
+    "\u2B00-\u2BFF"
+    "\u2190-\u21FF"
+    "\uFE0F\u200D"
+    "]"
+)
+
 _font_cache: dict[tuple[str, int], Any] = {}
 _resolved_font: str | None = None
+_resolved_emoji_font: str | None = None
+_emoji_font_obj: Any = None
 
 
 def resolve_font_path(preferred: str = "") -> str:
@@ -148,6 +176,76 @@ def _load_font(font_path: str, size: float):
     return font
 
 
+def resolve_emoji_font_path(preferred: str = "") -> str:
+    """找彩色 emoji 字体（Noto Color Emoji / Apple Color Emoji 那一类）。"""
+    global _resolved_emoji_font
+    if preferred:
+        path = os.path.expanduser(preferred)
+        if os.path.isfile(path):
+            return path
+    if _resolved_emoji_font is not None:
+        return _resolved_emoji_font
+
+    found: list[str] = []
+    for root in _EMOJI_FONT_ROOTS:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                if name.lower().endswith((".ttf", ".otf", ".ttc")):
+                    found.append(os.path.join(dirpath, name))
+
+    for path in found:
+        if any(hint in os.path.basename(path).lower() for hint in _EMOJI_FONT_HINTS):
+            _resolved_emoji_font = path
+            return path
+
+    _resolved_emoji_font = ""
+    return ""
+
+
+def _load_emoji_font():
+    global _emoji_font_obj
+    if _emoji_font_obj is not None:
+        return _emoji_font_obj
+    path = _resolved_emoji_font or ""
+    if not path:
+        return None
+    try:
+        _emoji_font_obj = ImageFont.truetype(path, EMOJI_FONT_SIZE)
+    except Exception:
+        try:
+            _emoji_font_obj = ImageFont.truetype(path, EMOJI_FONT_SIZE, index=0)
+        except Exception as e:
+            logger.debug(f"[reply_guard] emoji 字体打不开: {e}")
+            _emoji_font_obj = None
+    return _emoji_font_obj
+
+
+def _render_emoji(char: str, target_height: int):
+    """用彩色字体画一个 emoji，再缩放到目标高度。"""
+    font = _load_emoji_font()
+    if font is None or not char:
+        return None
+    try:
+        canvas = Image.new(
+            "RGBA", (EMOJI_FONT_SIZE * 2, EMOJI_FONT_SIZE * 2), (0, 0, 0, 0)
+        )
+        ImageDraw.Draw(canvas).text((0, 0), char, font=font, embedded_color=True)
+        box = canvas.getbbox()
+        if not box:
+            return None
+        canvas = canvas.crop(box)
+        ratio = target_height / max(1, canvas.height)
+        return canvas.resize(
+            (max(1, int(round(canvas.width * ratio))), max(1, target_height)),
+            Image.LANCZOS,
+        )
+    except Exception as e:
+        logger.debug(f"[reply_guard] emoji 渲染失败 {char!r}: {e}")
+        return None
+
+
 # ------------------------------------------------------------------ 数据结构
 
 
@@ -188,13 +286,30 @@ class LoadedImage:
 
 
 class FontManager:
-    def __init__(self, font_path: str) -> None:
+    def __init__(self, font_path: str, emoji_font_path: str = "") -> None:
         self.font_path = font_path
+        self.emoji_font_path = emoji_font_path or resolve_emoji_font_path()
 
     def font(self, size: float):
         return _load_font(self.font_path, size)
 
-    def measure(self, text: str, size: float) -> float:
+    @property
+    def has_emoji_font(self) -> bool:
+        return bool(self.emoji_font_path) and _load_emoji_font() is not None
+
+    @staticmethod
+    def runs(text: str) -> list[tuple[bool, str]]:
+        """按 emoji / 非 emoji 切段，方便分段换字体。"""
+        runs: list[tuple[bool, str]] = []
+        for char in text:
+            is_emoji = bool(_EMOJI_CHAR_RE.match(char))
+            if runs and runs[-1][0] == is_emoji:
+                runs[-1] = (is_emoji, runs[-1][1] + char)
+            else:
+                runs.append((is_emoji, char))
+        return runs
+
+    def plain_measure(self, text: str, size: float) -> float:
         if not text:
             return 0.0
         font = self.font(size)
@@ -202,6 +317,19 @@ class FontManager:
             return float(font.getlength(text)) / OUTPUT_SCALE
         except Exception:
             return len(text) * size * 0.6
+
+    def measure(self, text: str, size: float) -> float:
+        if not text:
+            return 0.0
+        if not self.has_emoji_font:
+            return self.plain_measure(text, size)
+        total = 0.0
+        for is_emoji, chunk in self.runs(text):
+            if is_emoji:
+                total += size * EMOJI_SCALE * len(chunk)
+            else:
+                total += self.plain_measure(chunk, size)
+        return total
 
     def line_metrics(self, text: str, size: float) -> tuple[float, float, float]:
         """返回 (宽度, ascent, descent)，单位是逻辑像素，descent 为正。"""
@@ -835,7 +963,7 @@ async def prepare_messages(
     def walk_reply(reply: ReplyMessage | None, depth: int = 0) -> ReplyMessage | None:
         if reply is None or depth > MAX_REPLY_DEPTH:
             return None
-        reply.segments = _expand_segments(list(reply.segments))
+        reply.segments = list(reply.segments)
         for segment in reply.segments:
             register(segment, "_image", _segment_urls(segment))
         reply.reply = walk_reply(reply.reply, depth + 1)
@@ -850,7 +978,7 @@ async def prepare_messages(
         item: dict[str, Any] = {
             "nickname": message.nickname or "匿名",
             "avatar": None,
-            "segments": _expand_segments(list(message.segments)),
+            "segments": list(message.segments),
             "reply": None,
         }
         if avatar_url:
@@ -908,14 +1036,45 @@ def _rounded_image(img: Any, size: tuple[int, int], radius: int) -> Any:
     return out
 
 
-def _draw_text(draw: Any, x: float, baseline: float, text: str, font: Any, color: str) -> None:
+def _draw_text(
+    canvas: Any,
+    draw: Any,
+    x: float,
+    baseline: float,
+    text: str,
+    fonts: FontManager,
+    size: float,
+    color: str,
+) -> None:
     if not text:
         return
+    font = fonts.font(size)
     try:
-        ascent, _descent = font.getmetrics()
+        ascent, descent = font.getmetrics()
     except Exception:
-        ascent = 0
-    draw.text((_s(x), _s(baseline) - ascent), text, font=font, fill=_hex(color))
+        ascent, descent = 0, 0
+
+    if not fonts.has_emoji_font:
+        draw.text((_s(x), _s(baseline) - ascent), text, font=font, fill=_hex(color))
+        return
+
+    cursor = x
+    for is_emoji, chunk in fonts.runs(text):
+        if is_emoji:
+            target = max(1, int(round(_s(size) * EMOJI_SCALE)))
+            drawn = False
+            for char in chunk:
+                img = _render_emoji(char, target)
+                if img is None:
+                    continue
+                top = int(round(_s(baseline) + descent - target))
+                canvas.paste(img, (int(round(_s(cursor))), top), img)
+                cursor += size * EMOJI_SCALE
+                drawn = True
+            if drawn:
+                continue
+        draw.text((_s(cursor), _s(baseline) - ascent), chunk, font=font, fill=_hex(color))
+        cursor += fonts.plain_measure(chunk, size)
 
 
 def _draw_segments(
@@ -928,10 +1087,11 @@ def _draw_segments(
 ) -> None:
     for segment in layouts:
         if segment.type == "text":
-            font = fonts.font(TEXT_SIZE)
             for index, line in enumerate(segment.lines):
                 baseline = segment.y + line.baseline + index * TEXT_LINE_HEIGHT
-                _draw_text(draw, segment.x, baseline, line.text, font, text_color)
+                _draw_text(
+                    canvas, draw, segment.x, baseline, line.text, fonts, TEXT_SIZE, text_color
+                )
         elif segment.image is not None:
             if skip_animation and segment.animation:
                 continue
@@ -966,12 +1126,20 @@ def _draw_reply(
         fill=_hex(REPLY_BAR_COLOR),
     )
     _draw_reply(canvas, draw, reply.reply, fonts, skip_animation)
-    nickname_font = fonts.font(NICKNAME_SIZE)
     for index, line in enumerate(reply.nickname.lines):
         baseline = (
             reply.nickname.y + line.baseline + index * NICKNAME_HEIGHT
         )
-        _draw_text(draw, reply.nickname.x, baseline, line.text, nickname_font, NICKNAME_COLOR)
+        _draw_text(
+            canvas,
+            draw,
+            reply.nickname.x,
+            baseline,
+            line.text,
+            fonts,
+            NICKNAME_SIZE,
+            NICKNAME_COLOR,
+        )
     _draw_segments(canvas, draw, reply.segments, REPLY_TEXT_COLOR, fonts, skip_animation)
 
 
@@ -1011,7 +1179,16 @@ def render_card_sync(
         # 昵称
         for index, line in enumerate(row.nickname.lines):
             baseline = row.nickname.y + line.baseline + index * NICKNAME_HEIGHT
-            _draw_text(draw, row.nickname.x, baseline, line.text, nickname_font, NICKNAME_COLOR)
+            _draw_text(
+                canvas,
+                draw,
+                row.nickname.x,
+                baseline,
+                line.text,
+                fonts,
+                NICKNAME_SIZE,
+                NICKNAME_COLOR,
+            )
 
         # 气泡
         draw.rounded_rectangle(
