@@ -1,0 +1,158 @@
+{
+  "enable_keyword_reply": {
+    "description": "启用关键词自动回复",
+    "hint": "从 xlsx 表里读 A 列关键词、B 列回复内容，消息与关键词完全一致时回复（精准匹配），且该条消息不写入历史。A/B 任一为空的行跳过，重复关键词以靠下的行为准。",
+    "type": "bool",
+    "default": true
+  },
+  "keyword": {
+    "description": "关键词表设置",
+    "type": "object",
+    "hint": "表格读取相关选项",
+    "items": {
+      "xlsx_path": {
+        "description": "xlsx 文件路径",
+        "hint": "留空默认读取 data/plugin_data/astrbot_plugin_reply_guard/keywords.xlsx。相对路径以 AstrBot 数据目录为基准。",
+        "type": "string",
+        "default": ""
+      },
+      "sheet": {
+        "description": "工作表名",
+        "hint": "留空使用第一个工作表。",
+        "type": "string",
+        "default": ""
+      },
+      "reload_interval": {
+        "description": "热重载检查间隔（秒）",
+        "hint": "文件修改后最多等这么久自动重载，填 0 关闭热重载。",
+        "type": "int",
+        "default": 60,
+        "slider": {
+          "min": 0,
+          "max": 600,
+          "step": 10
+        }
+      },
+      "has_header": {
+        "description": "第一行是表头",
+        "hint": "开启后跳过 xlsx 的第一行。",
+        "type": "bool",
+        "default": false
+      },
+      "scope": {
+        "description": "生效范围",
+        "hint": "留空=全部会话。可填群号、用户号或完整会话标识（平台:类型:ID），填 * 表示全部。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  },
+  "enable_probability": {
+    "description": "启用回复概率门",
+    "hint": "未命中关键词的消息按概率决定是否触发 LLM 回复，未通过的消息不回复、也不写入历史。",
+    "type": "bool",
+    "default": true
+  },
+  "probability": {
+    "description": "概率门设置",
+    "type": "object",
+    "hint": "全局触发概率",
+    "items": {
+      "value": {
+        "description": "触发概率",
+        "hint": "0 表示永不主动回复，1 表示每条都交给 LLM。",
+        "type": "float",
+        "default": 0.15,
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.01
+        }
+      },
+      "mode": {
+        "description": "作用会话类型",
+        "hint": "group_only=只对群聊生效（私聊照常回复）；private_only=只对私聊生效；all=都生效。",
+        "type": "string",
+        "default": "group_only",
+        "options": ["group_only", "private_only", "all"]
+      },
+      "scope_list": {
+        "description": "概率门生效范围",
+        "hint": "留空=全部会话，可填群号/用户号/完整会话标识。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  },
+  "enable_sensitive_filter": {
+    "description": "启用敏感词拦截",
+    "hint": "LLM 生成完毕后检查回复内容，命中敏感词就不发送、该轮消息也不写入历史。",
+    "type": "bool",
+    "default": true
+  },
+  "sensitive": {
+    "description": "敏感词设置",
+    "type": "object",
+    "hint": "针对 LLM 回复内容的拦截词",
+    "items": {
+      "words": {
+        "description": "敏感词列表",
+        "hint": "回复内容包含其中任意一个词就整条跳过（大小写不敏感）。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "scope": {
+        "description": "拦截生效范围",
+        "hint": "留空=全部会话。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  },
+  "enable_quote": {
+    "description": "启用 /q 引用图",
+    "hint": "引用一条消息后发送 /q，把那条消息渲染成引用图发出来。",
+    "type": "bool",
+    "default": true
+  },
+  "quote": {
+    "description": "引用图设置",
+    "type": "object",
+    "hint": "渲染相关选项",
+    "items": {
+      "font_path": {
+        "description": "字体文件路径",
+        "hint": "留空自动查找系统里的中文字体。",
+        "type": "string",
+        "default": ""
+      },
+      "proxy": {
+        "description": "下载代理",
+        "hint": "留空直连。头像和图片走这个代理下载，如 http://127.0.0.1:7890。",
+        "type": "string",
+        "default": ""
+      },
+      "scope": {
+        "description": "生效范围",
+        "hint": "留空=全部会话。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  }
+}
