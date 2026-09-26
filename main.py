@@ -92,7 +92,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.1.5",
+    "0.1.6",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -327,8 +327,8 @@ class ReplyGuardPlugin(Star):
         if count <= 1:
             return [first]
 
-        following = await self._fetch_following_messages(event, reply_comp, count)
-        return ([first] + following)[:count]
+        before = await self._fetch_previous_messages(event, reply_comp, count)
+        return (before + [first])[-count:]
 
     async def _build_quote_message(
         self, event: AstrMessageEvent, reply_comp
@@ -365,10 +365,13 @@ class ReplyGuardPlugin(Star):
             reply=reply,
         )
 
-    async def _fetch_following_messages(
+    async def _fetch_previous_messages(
         self, event: AstrMessageEvent, reply_comp, count: int
     ) -> list[QuoteMessage]:
-        """取被引用消息之后的消息，拿不到就返回空。"""
+        """取被引用消息之前的若干条，拼在它前面（被引用那条排最后）。"""
+        want = max(0, count - 1)
+        if want <= 0:
+            return []
         group_id = str(event.get_group_id() or "")
         if not group_id:
             return []
@@ -424,7 +427,7 @@ class ReplyGuardPlugin(Star):
                 f"{item.get('message_id')}@{_as_int(item.get('time'), 0)}"
                 for item in ordered[:12]
             )
-            + f" | 目标 {target_id}@{quoted_ts}"
+            + f" | 目标 {target_id}@{quoted_ts} | 需要前 {want} 条"
         )
 
         start = -1
@@ -433,21 +436,25 @@ class ReplyGuardPlugin(Star):
                 start = index
                 break
         if start >= 0:
-            candidates = ordered[start + 1 :]
+            candidates = ordered[max(0, start - want) : start]
         elif quoted_ts:
-            # 找不到目标就按时间戳兜底：只取比它晚的
-            candidates = [
-                item for item in ordered if _as_int(item.get("time"), 0) > quoted_ts
+            # 定位不到就按时间戳兜底：只取比它早的
+            earlier = [
+                item
+                for item in ordered
+                if _as_int(item.get("time"), 0)
+                and _as_int(item.get("time"), 0) < quoted_ts
             ]
+            candidates = earlier[-want:]
         else:
             return []
 
-        following: list[QuoteMessage] = []
-        for item in candidates[: max(0, count - 1)]:
+        previous: list[QuoteMessage] = []
+        for item in candidates:
             message = self._onebot_to_quote(item)
             if message is not None:
-                following.append(message)
-        return following
+                previous.append(message)
+        return previous[-want:]
 
     @staticmethod
     def _onebot_to_quote(data: dict) -> QuoteMessage | None:

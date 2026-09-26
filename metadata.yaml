@@ -1,6 +1,6 @@
 name: astrbot_plugin_reply_guard
 display_name: 群聊回复守卫
-version: 0.1.5
+version: 0.1.6
 author: coco
 short_desc: 群聊关键词精准回复（xlsx 表）、全局回复概率门、LLM 敏感词拦截、/q 引用图。
 desc: |
