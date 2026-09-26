@@ -24,6 +24,7 @@ from .core.quote_render import (
     ReplyMessage,
     render_quote_card,
 )
+from .core.quote_render import _parse_cq_string as parse_cq_string
 
 PLUGIN_NAME = "astrbot_plugin_reply_guard"
 MAX_QUOTE_MESSAGES = 10
@@ -94,7 +95,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.2.2",
+    "0.2.3",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -725,10 +726,15 @@ class ReplyGuardPlugin(Star):
         segments: list[MessageSegment] = []
         reply_id: str | None = None
         raw = data.get("message")
+        if raw is None:
+            raw = data.get("raw_message")
         if isinstance(raw, str):
             text = raw.strip()
-            if text:
-                segments.append(MessageSegment(type="text", text=text))
+            if not text:
+                return segments, None
+            if "[CQ:" in text:
+                return parse_cq_string(text)
+            segments.append(MessageSegment(type="text", text=text))
             return segments, None
 
         for seg in raw or []:

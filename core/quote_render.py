@@ -928,6 +928,71 @@ def _expand_segments(segments: list[MessageSegment]) -> list[MessageSegment]:
     return expanded
 
 
+_CQ_CODE_RE = re.compile(r"\[CQ:([a-zA-Z_]+),?([^\]]*)\]")
+
+
+def _merge_text_segments(segments: list[MessageSegment]) -> list[MessageSegment]:
+    """相邻的文本段合并成一段，免得被排版拆成多行。"""
+    merged: list[MessageSegment] = []
+    for segment in segments:
+        if segment.type == "text":
+            if not (segment.text or ""):
+                continue
+            if merged and merged[-1].type == "text":
+                merged[-1].text = (merged[-1].text or "") + (segment.text or "")
+                continue
+        merged.append(segment)
+    return merged
+
+
+def _parse_cq_string(text: str) -> tuple[list[MessageSegment], str | None]:
+    """解析 [CQ:xxx,key=value] 形式的消息串（get_msg 返回的就是这种）。"""
+    segments: list[MessageSegment] = []
+    reply_id: str | None = None
+    cursor = 0
+    for match in _CQ_CODE_RE.finditer(text or ""):
+        if match.start() > cursor:
+            plain = text[cursor : match.start()]
+            if plain:
+                segments.append(MessageSegment(type="text", text=plain))
+        code = match.group(1)
+        params: dict[str, str] = {}
+        for pair in match.group(2).split(","):
+            if "=" in pair:
+                key, value = pair.split("=", 1)
+                params[key.strip()] = value.strip()
+
+        if code == "at":
+            qq = str(params.get("qq") or "")
+            if qq == "all":
+                segments.append(MessageSegment(type="text", text="@全体成员"))
+            elif qq:
+                segments.append(MessageSegment(type="at", id=qq))
+        elif code == "image":
+            url = str(params.get("url") or "")
+            if url.startswith("http"):
+                segments.append(MessageSegment(type="image", kind="image", url=url))
+            else:
+                segments.append(MessageSegment(type="text", text="[图片]"))
+        elif code == "face":
+            face_id = str(params.get("id") or "")
+            if face_id.isdigit():
+                segments.append(MessageSegment(type="face", kind="emoji", id=face_id))
+            else:
+                segments.append(MessageSegment(type="text", text="[表情]"))
+        elif code == "reply":
+            reply_id = str(params.get("id") or "") or None
+        elif code == "json" or code == "xml":
+            segments.append(MessageSegment(type="text", text="[卡片消息]"))
+        cursor = match.end()
+
+    if cursor < len(text or ""):
+        tail = text[cursor:]
+        if tail:
+            segments.append(MessageSegment(type="text", text=tail))
+    return _merge_text_segments(segments), reply_id
+
+
 def _segment_urls(segment: MessageSegment) -> list[str]:
     """图片段和 QQ 表情要取的地址，表情优先 apng。"""
     if segment.type == "image" and segment.url:
@@ -969,7 +1034,7 @@ async def prepare_messages(
             reply.segments = [
                 MessageSegment(type="text", text=REPLY_UNAVAILABLE_TEXT)
             ]
-        reply.segments = list(reply.segments)
+        reply.segments = _merge_text_segments(list(reply.segments))
         for segment in reply.segments:
             register(segment, "_image", _segment_urls(segment))
         reply.reply = walk_reply(reply.reply, depth + 1)
@@ -984,7 +1049,7 @@ async def prepare_messages(
         item: dict[str, Any] = {
             "nickname": message.nickname or "匿名",
             "avatar": None,
-            "segments": list(message.segments),
+            "segments": _merge_text_segments(list(message.segments)),
             "reply": None,
         }
         if avatar_url:
