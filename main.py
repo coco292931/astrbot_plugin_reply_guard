@@ -94,7 +94,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.2.1",
+    "0.2.2",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -528,6 +528,8 @@ class ReplyGuardPlugin(Star):
         user_id = str(getattr(reply_comp, "sender_id", "") or "")
         segments: list[MessageSegment] = []
         reply: ReplyMessage | None = None
+        message_id = str(getattr(reply_comp, "id", "") or "")
+        msg_time = _as_int(getattr(reply_comp, "time", 0), 0)
 
         chain = list(getattr(reply_comp, "chain", None) or [])
         if chain:
