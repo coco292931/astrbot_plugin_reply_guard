@@ -11,7 +11,7 @@ from typing import Any, Iterable
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image as AstrImage
-from astrbot.api.message_components import Plain, Reply
+from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
@@ -92,7 +92,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.1.6",
+    "0.1.7",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -149,6 +149,7 @@ class ReplyGuardPlugin(Star):
         self.quote_font_path = str(cfg.get("quote_font_path") or "").strip()
         self.quote_proxy = str(cfg.get("quote_proxy") or "").strip()
         self.quote_scope = _as_list(cfg.get("quote_scope"))
+        self._at_name_cache: dict[str, str] = {}
 
     async def initialize(self) -> None:
         if self.enable_keyword_reply:
@@ -299,6 +300,8 @@ class ReplyGuardPlugin(Star):
             yield event.plain_result("读不到那条消息汪")
             return
 
+        await self._resolve_at_names(event, messages)
+
         filename = f"quote_{int(time.time() * 1000)}"
         try:
             out_path = await render_quote_card(
@@ -317,6 +320,80 @@ class ReplyGuardPlugin(Star):
         yield event.chain_result([AstrImage.fromFileSystem(out_path)])
 
     # ------------------------------------------------------- 消息收集与解析
+
+    async def _resolve_at_names(
+        self, event: AstrMessageEvent, messages: list[QuoteMessage]
+    ) -> None:
+        """把 @ 的号换成群名片/昵称，顺手把 at 段变成文本段。"""
+        group_id = str(event.get_group_id() or "")
+        wanted: dict[str, str] = {}
+
+        def collect(segments: list[MessageSegment]) -> None:
+            for segment in segments:
+                if segment.type == "at" and segment.id:
+                    wanted.setdefault(segment.id, segment.text or "")
+
+        def walk_collect(reply: ReplyMessage | None) -> None:
+            if reply is None:
+                return
+            collect(reply.segments)
+            walk_collect(reply.reply)
+
+        for message in messages:
+            collect(message.segments)
+            walk_collect(message.reply)
+
+        missing = [
+            qq
+            for qq, name in wanted.items()
+            if not name and qq != "all" and qq.isdigit()
+        ]
+        if missing and group_id:
+            client = self._get_client(event)
+            if client is not None:
+                for qq in missing:
+                    cache_key = f"{group_id}:{qq}"
+                    cached = self._at_name_cache.get(cache_key)
+                    if cached:
+                        wanted[qq] = cached
+                        continue
+                    try:
+                        info = await client.call_action(
+                            "get_group_member_info",
+                            group_id=int(group_id),
+                            user_id=int(qq),
+                        )
+                    except Exception as e:
+                        logger.debug(f"[reply_guard] 取群名片失败 {qq}: {e}")
+                        continue
+                    data = info.get("data") if isinstance(info, dict) else None
+                    if isinstance(data, dict):
+                        name = str(data.get("card") or data.get("nickname") or "")
+                        if name:
+                            wanted[qq] = name
+                            self._at_name_cache[cache_key] = name
+
+        def apply(segments: list[MessageSegment]) -> None:
+            for segment in segments:
+                if segment.type != "at":
+                    continue
+                if segment.id == "all":
+                    segment.type = "text"
+                    segment.text = "@全体成员"
+                    continue
+                name = wanted.get(segment.id) or segment.text or segment.id
+                segment.type = "text"
+                segment.text = f"@{name}"
+
+        def walk_apply(reply: ReplyMessage | None) -> None:
+            if reply is None:
+                return
+            apply(reply.segments)
+            walk_apply(reply.reply)
+
+        for message in messages:
+            apply(message.segments)
+            walk_apply(message.reply)
 
     async def _build_quote_messages(
         self, event: AstrMessageEvent, reply_comp, count: int
@@ -485,6 +562,13 @@ class ReplyGuardPlugin(Star):
                     segments.append(
                         MessageSegment(type="image", kind="image", url=target)
                     )
+            elif isinstance(comp, At):
+                qq = str(getattr(comp, "qq", "") or "")
+                name = str(getattr(comp, "name", "") or "")
+                if qq == "all":
+                    segments.append(MessageSegment(type="text", text="@全体成员"))
+                elif qq:
+                    segments.append(MessageSegment(type="at", id=qq, text=name))
             elif isinstance(comp, Reply):
                 nested_chain = list(getattr(comp, "chain", None) or [])
                 if not nested_chain:
@@ -534,11 +618,8 @@ class ReplyGuardPlugin(Star):
                     segments.append(MessageSegment(type="text", text="[表情]"))
             elif seg_type == "at":
                 qq = str(seg_data.get("qq") or "")
-                segments.append(
-                    MessageSegment(
-                        type="text", text="@全体成员" if qq == "all" else f"@{qq}"
-                    )
-                )
+                if qq:
+                    segments.append(MessageSegment(type="at", id=qq))
         return segments, None
 
     # ------------------------------------------------------------ OneBot
