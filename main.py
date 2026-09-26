@@ -92,7 +92,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.1.4",
+    "0.1.5",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -382,7 +382,7 @@ class ReplyGuardPlugin(Star):
             result = await client.call_action(
                 "get_group_msg_history",
                 group_id=int(group_id),
-                count=int(count) + 5,
+                count=max(int(count) * 3, 20),
             )
         except Exception as e:
             logger.debug(f"[reply_guard] get_group_msg_history 失败: {e}")
@@ -401,26 +401,49 @@ class ReplyGuardPlugin(Star):
             return []
 
         records = [item for item in raw if isinstance(item, dict)]
-        records.sort(
-            key=lambda item: (
-                _as_int(item.get("time"), 0),
-                _as_int(item.get("message_seq"), 0),
+        if not records:
+            return []
+
+        def _key(item: dict) -> tuple[int, int]:
+            seq = _as_int(item.get("message_seq"), 0) or _as_int(
+                item.get("message_id"), 0
             )
-        )
+            return (_as_int(item.get("time"), 0), seq)
+
+        ordered = sorted(records, key=_key)
+        keys = [_key(item) for item in ordered]
+        if keys and keys[0] == keys[-1]:
+            # 时间和序号都拿不到，按接口惯例（新在前）反过来
+            ordered = list(reversed(records))
 
         target_id = str(getattr(reply_comp, "id", "") or "")
+        quoted_ts = _as_int(getattr(reply_comp, "time", 0), 0)
+        logger.info(
+            "[reply_guard] 历史窗口: "
+            + ", ".join(
+                f"{item.get('message_id')}@{_as_int(item.get('time'), 0)}"
+                for item in ordered[:12]
+            )
+            + f" | 目标 {target_id}@{quoted_ts}"
+        )
+
         start = -1
-        for index, item in enumerate(records):
+        for index, item in enumerate(ordered):
             if str(item.get("message_id") or "") == target_id:
                 start = index
                 break
-        if start < 0:
+        if start >= 0:
+            candidates = ordered[start + 1 :]
+        elif quoted_ts:
+            # 找不到目标就按时间戳兜底：只取比它晚的
+            candidates = [
+                item for item in ordered if _as_int(item.get("time"), 0) > quoted_ts
+            ]
+        else:
             return []
 
         following: list[QuoteMessage] = []
-        for item in records[start + 1 : start + count]:
-            if not isinstance(item, dict):
-                continue
+        for item in candidates[: max(0, count - 1)]:
             message = self._onebot_to_quote(item)
             if message is not None:
                 following.append(message)
