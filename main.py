@@ -94,7 +94,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.1.9",
+    "0.2.0",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -337,6 +337,8 @@ class ReplyGuardPlugin(Star):
                         for segment in message.segments
                     ],
                     "reply": message.reply.nickname if message.reply else None,
+                    "message_id": message.message_id,
+                    "time": message.time,
                 }
                 for message in messages
             ]
@@ -535,6 +537,8 @@ class ReplyGuardPlugin(Star):
             nickname=nickname,
             segments=segments,
             reply=reply,
+            message_id=str(getattr(reply_comp, "id", "") or ""),
+            time=_as_int(getattr(reply_comp, "time", 0), 0),
         )
 
     async def _fetch_previous_messages(
@@ -593,6 +597,7 @@ class ReplyGuardPlugin(Star):
 
         target_id = str(getattr(reply_comp, "id", "") or "")
         quoted_ts = _as_int(getattr(reply_comp, "time", 0), 0)
+        stamped = [item for item in ordered if _as_int(item.get("time"), 0) > 0]
         logger.info(
             "[reply_guard] 历史窗口: "
             + ", ".join(
@@ -602,24 +607,31 @@ class ReplyGuardPlugin(Star):
             + f" | 目标 {target_id}@{quoted_ts} | 需要前 {want} 条"
         )
 
-        start = -1
-        for index, item in enumerate(ordered):
-            if str(item.get("message_id") or "") == target_id:
-                start = index
-                break
-        if start >= 0:
-            candidates = ordered[max(0, start - want) : start]
-        elif quoted_ts:
-            # 定位不到就按时间戳兜底：只取比它早的
-            earlier = [
+        candidates: list[dict] = []
+        if quoted_ts and len(stamped) >= 2:
+            # 有时间和目标时间，直接按时间取更早的，最稳
+            candidates = [
                 item
-                for item in ordered
-                if _as_int(item.get("time"), 0)
-                and _as_int(item.get("time"), 0) < quoted_ts
-            ]
-            candidates = earlier[-want:]
-        else:
-            return []
+                for item in stamped
+                if _as_int(item.get("time"), 0) < quoted_ts
+            ][-want:]
+        if not candidates:
+            start = -1
+            for index, item in enumerate(ordered):
+                if str(item.get("message_id") or "") == target_id:
+                    start = index
+                    break
+            if start >= 0:
+                candidates = ordered[max(0, start - want) : start]
+            elif quoted_ts:
+                candidates = [
+                    item
+                    for item in ordered
+                    if _as_int(item.get("time"), 0)
+                    and _as_int(item.get("time"), 0) < quoted_ts
+                ][-want:]
+            else:
+                return []
 
         previous: list[QuoteMessage] = []
         for item in candidates:
@@ -643,6 +655,8 @@ class ReplyGuardPlugin(Star):
             nickname=nickname,
             segments=segments,
             reply=None,
+            message_id=str(data.get("message_id") or ""),
+            time=_as_int(data.get("time"), 0),
         )
 
     @staticmethod
