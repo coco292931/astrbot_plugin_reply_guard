@@ -1,6 +1,6 @@
 name: astrbot_plugin_reply_guard
 display_name: 群聊回复守卫
-version: 0.1.0
+version: 0.1.1
 author: coco
 short_desc: 群聊关键词精准回复（xlsx 表）、全局回复概率门、LLM 敏感词拦截、/q 引用图。
 desc: |
@@ -13,7 +13,7 @@ desc: |
      不回复也不落盘，历史里只留下真正发生过对话的消息。
   3. 敏感词拦截：LLM 生成完毕后检查回复正文，命中敏感词则整条跳过，
      消息同样不写入历史。
-  4. /q 引用图：引用一条消息发送 /q，把那条消息（昵称、头像、正文、图片、时间）
-     渲染成引用图发出来，不依赖外部渲染服务。
+  4. /q 引用图：引用消息后发送 /q，按聊天气泡样式渲染引用图，支持嵌套引用和多条
+     群消息（/q N，最多 10 条），消息里有动态表情时输出动态 GIF，不依赖外部渲染服务。
 astrbot_version: ">=4.0.0"
 repo: https://github.com/coco292931/astrbot_plugin_reply_guard
