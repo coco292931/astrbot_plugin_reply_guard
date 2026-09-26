@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -524,7 +525,12 @@ class LayoutEngine:
                     layout.image = image.image
                     layout.animation = image.animation
                 else:
-                    placeholder = "[表情]" if segment.type == "face" else "[图片]"
+                    if segment.kind == "emoji" and segment.text:
+                        placeholder = segment.text
+                    elif segment.type == "face":
+                        placeholder = "[表情]"
+                    else:
+                        placeholder = "[图片]"
                     layout.type = "text"
                     layout.lines = [
                         self._text_line(placeholder, TEXT_SIZE, TEXT_LINE_HEIGHT)
@@ -742,6 +748,57 @@ def segment_image(segment: MessageSegment) -> LoadedImage | None:
     return image if isinstance(image, LoadedImage) else None
 
 
+_TWEMOJI_URL = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.1.0/assets/72x72/{name}.png"
+
+_EMOJI_SEQ_RE = re.compile(
+    "(?:"
+    "[\U0001F1E6-\U0001F1FF]{2}"
+    "|[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2190-\u21FF]"
+    "\uFE0F?"
+    "[\U0001F3FB-\U0001F3FF]?"
+    "(?:\u200D[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]"
+    "\uFE0F?[\U0001F3FB-\U0001F3FF]?)*"
+    ")"
+)
+
+
+def _emoji_name(chars: str) -> str:
+    codepoints = [ord(char) for char in chars if ord(char) != 0xFE0F]
+    return "-".join(f"{cp:x}" for cp in codepoints)
+
+
+def _split_text_emoji(text: str) -> list[MessageSegment]:
+    """把文本里的 emoji 拆成图片段，交给内联表情排版。"""
+    segments: list[MessageSegment] = []
+    cursor = 0
+    for match in _EMOJI_SEQ_RE.finditer(text):
+        start, end = match.span()
+        if start > cursor:
+            segments.append(MessageSegment(type="text", text=text[cursor:start]))
+        segments.append(
+            MessageSegment(
+                type="image",
+                kind="emoji",
+                url=_TWEMOJI_URL.format(name=_emoji_name(match.group())),
+                text=match.group(),
+            )
+        )
+        cursor = end
+    if cursor < len(text):
+        segments.append(MessageSegment(type="text", text=text[cursor:]))
+    return segments or [MessageSegment(type="text", text=text)]
+
+
+def _expand_segments(segments: list[MessageSegment]) -> list[MessageSegment]:
+    expanded: list[MessageSegment] = []
+    for segment in segments:
+        if segment.type == "text" and segment.text:
+            expanded.extend(_split_text_emoji(segment.text))
+        else:
+            expanded.append(segment)
+    return expanded
+
+
 def _segment_urls(segment: MessageSegment) -> list[str]:
     """图片段和 QQ 表情要取的地址，表情优先 apng。"""
     if segment.type == "image" and segment.url:
@@ -778,6 +835,7 @@ async def prepare_messages(
     def walk_reply(reply: ReplyMessage | None, depth: int = 0) -> ReplyMessage | None:
         if reply is None or depth > MAX_REPLY_DEPTH:
             return None
+        reply.segments = _expand_segments(list(reply.segments))
         for segment in reply.segments:
             register(segment, "_image", _segment_urls(segment))
         reply.reply = walk_reply(reply.reply, depth + 1)
@@ -792,7 +850,7 @@ async def prepare_messages(
         item: dict[str, Any] = {
             "nickname": message.nickname or "匿名",
             "avatar": None,
-            "segments": message.segments,
+            "segments": _expand_segments(list(message.segments)),
             "reply": None,
         }
         if avatar_url:

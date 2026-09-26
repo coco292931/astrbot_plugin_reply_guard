@@ -92,7 +92,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.1.2",
+    "0.1.3",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -375,17 +375,14 @@ class ReplyGuardPlugin(Star):
         client = self._get_client(event)
         if client is None:
             return []
-        try:
-            seq = int(str(getattr(reply_comp, "id", "")))
-        except (TypeError, ValueError):
+        if not str(getattr(reply_comp, "id", "") or "").strip():
             return []
 
         try:
             result = await client.call_action(
                 "get_group_msg_history",
                 group_id=int(group_id),
-                message_seq=seq,
-                count=int(count) + 1,
+                count=int(count) + 5,
             )
         except Exception as e:
             logger.debug(f"[reply_guard] get_group_msg_history 失败: {e}")
@@ -403,11 +400,17 @@ class ReplyGuardPlugin(Star):
         if not isinstance(raw, list):
             return []
 
+        records = [item for item in raw if isinstance(item, dict)]
+        records.sort(
+            key=lambda item: (
+                _as_int(item.get("time"), 0),
+                _as_int(item.get("message_seq"), 0),
+            )
+        )
+
         target_id = str(getattr(reply_comp, "id", "") or "")
         start = -1
-        for index, item in enumerate(raw):
-            if not isinstance(item, dict):
-                continue
+        for index, item in enumerate(records):
             if str(item.get("message_id") or "") == target_id:
                 start = index
                 break
@@ -415,7 +418,7 @@ class ReplyGuardPlugin(Star):
             return []
 
         following: list[QuoteMessage] = []
-        for item in raw[start + 1 : start + count]:
+        for item in records[start + 1 : start + count]:
             if not isinstance(item, dict):
                 continue
             message = self._onebot_to_quote(item)
