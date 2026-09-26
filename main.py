@@ -95,7 +95,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.2.3",
+    "0.2.4",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -522,6 +522,26 @@ class ReplyGuardPlugin(Star):
             reply=await self._fetch_onebot_reply(event, reply_id, depth + 1),
         )
 
+    async def _enrich_reply(
+        self, event: AstrMessageEvent, reply: ReplyMessage | None, depth: int
+    ) -> ReplyMessage | None:
+        """引用链里只有 id 没内容的节点，用 get_msg 补上。"""
+        if reply is None or depth > MAX_REPLY_DEPTH:
+            return reply
+        empty = not reply.segments or (
+            len(reply.segments) == 1
+            and reply.segments[0].type == "text"
+            and reply.segments[0].text in ("[引用消息不可用]", "")
+        )
+        if empty and reply.message_id:
+            fetched = await self._fetch_onebot_reply(event, reply.message_id, depth)
+            if fetched is not None:
+                if not fetched.nickname or fetched.nickname == "匿名":
+                    fetched.nickname = reply.nickname or fetched.nickname
+                reply = fetched
+        reply.reply = await self._enrich_reply(event, reply.reply, depth + 1)
+        return reply
+
     async def _build_quote_message(
         self, event: AstrMessageEvent, reply_comp
     ) -> QuoteMessage | None:
@@ -551,6 +571,8 @@ class ReplyGuardPlugin(Star):
                 msg_time = _as_int(data.get("time"), msg_time)
                 segments, reply_id = self._parse_onebot_message(data)
                 reply = await self._fetch_onebot_reply(event, reply_id, 1)
+        else:
+            reply = await self._enrich_reply(event, reply, 1)
 
         if not segments and not nickname:
             return None
@@ -701,12 +723,14 @@ class ReplyGuardPlugin(Star):
                     segments.append(MessageSegment(type="at", id=qq, text=name))
             elif isinstance(comp, Reply):
                 nested_chain = list(getattr(comp, "chain", None) or [])
+                nested_id = str(getattr(comp, "id", "") or "")
                 if not nested_chain:
                     reply = ReplyMessage(
                         nickname=str(getattr(comp, "sender_nickname", "") or ""),
                         segments=[
                             MessageSegment(type="text", text="[引用消息不可用]")
                         ],
+                        message_id=nested_id,
                     )
                     continue
                 nested_segments, nested_reply = ReplyGuardPlugin._parse_astr_chain(
@@ -716,6 +740,7 @@ class ReplyGuardPlugin(Star):
                     nickname=str(getattr(comp, "sender_nickname", "") or ""),
                     segments=nested_segments,
                     reply=nested_reply,
+                    message_id=nested_id,
                 )
         return segments, reply
 

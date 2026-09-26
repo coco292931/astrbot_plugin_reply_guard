@@ -262,6 +262,7 @@ class ReplyMessage:
     nickname: str = ""
     segments: list[MessageSegment] = field(default_factory=list)
     reply: "ReplyMessage | None" = None
+    message_id: str = ""
 
 
 @dataclass
