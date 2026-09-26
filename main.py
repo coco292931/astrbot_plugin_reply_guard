@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
@@ -93,7 +94,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.1.8",
+    "0.1.9",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -151,6 +152,7 @@ class ReplyGuardPlugin(Star):
         self.quote_proxy = str(cfg.get("quote_proxy") or "").strip()
         self.quote_scope = _as_list(cfg.get("quote_scope"))
         self._at_name_cache: dict[str, str] = {}
+        self._member_cache: dict[str, dict] = {}
 
     async def initialize(self) -> None:
         if self.enable_keyword_reply:
@@ -302,6 +304,7 @@ class ReplyGuardPlugin(Star):
             return
 
         await self._resolve_at_names(event, messages)
+        self._dump_quote_debug(messages)
 
         filename = f"quote_{int(time.time() * 1000)}"
         try:
@@ -321,6 +324,63 @@ class ReplyGuardPlugin(Star):
         yield event.chain_result([AstrImage.fromFileSystem(out_path)])
 
     # ------------------------------------------------------- 消息收集与解析
+
+    def _dump_quote_debug(self, messages: list[QuoteMessage]) -> None:
+        """把这次拼进图里的内容落一份，出问题了直接看。"""
+        try:
+            payload = [
+                {
+                    "nickname": message.nickname,
+                    "user_id": message.user_id,
+                    "segments": [
+                        f"{segment.type}:{segment.kind}:{segment.text or segment.url or segment.id}"
+                        for segment in message.segments
+                    ],
+                    "reply": message.reply.nickname if message.reply else None,
+                }
+                for message in messages
+            ]
+            path = os.path.join(self.cache_dir, "last_quote.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=1)
+        except Exception as e:
+            logger.debug(f"[reply_guard] 写调试信息失败: {e}")
+
+    async def _group_member_names(self, client, group_id: str) -> dict[str, str]:
+        """拉一次群成员表，10 分钟内复用。"""
+        now = time.time()
+        cached = self._member_cache.get(group_id)
+        if cached and now - float(cached.get("at") or 0) < 600:
+            return dict(cached.get("names") or {})
+
+        try:
+            result = await client.call_action(
+                "get_group_member_list", group_id=int(group_id)
+            )
+        except Exception as e:
+            logger.debug(f"[reply_guard] 取群成员列表失败: {e}")
+            return {}
+
+        raw: list = []
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, list):
+                raw = data
+            elif isinstance(data, dict) and isinstance(data.get("list"), list):
+                raw = data["list"]
+        elif isinstance(result, list):
+            raw = result
+
+        names: dict[str, str] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            qq = str(item.get("user_id") or "")
+            if qq:
+                names[qq] = str(item.get("card") or item.get("nickname") or "")
+        self._member_cache[group_id] = {"at": now, "names": names}
+        logger.info(f"[reply_guard] 群成员表已缓存 {len(names)} 人")
+        return names
 
     async def _resolve_at_names(
         self, event: AstrMessageEvent, messages: list[QuoteMessage]
@@ -353,11 +413,20 @@ class ReplyGuardPlugin(Star):
             client = self._get_client(event)
             if client is not None:
                 for qq in missing:
-                    cache_key = f"{group_id}:{qq}"
-                    cached = self._at_name_cache.get(cache_key)
+                    cached = self._at_name_cache.get(f"{group_id}:{qq}")
                     if cached:
                         wanted[qq] = cached
-                        continue
+
+                # 先用一次群成员列表把名字对上，比逐个查省事
+                if [qq for qq in missing if not wanted.get(qq)]:
+                    for qq, name in (
+                        await self._group_member_names(client, group_id)
+                    ).items():
+                        if qq in missing and name and not wanted.get(qq):
+                            wanted[qq] = name
+                            self._at_name_cache[f"{group_id}:{qq}"] = name
+
+                for qq in [q for q in missing if not wanted.get(q)]:
                     try:
                         info = await client.call_action(
                             "get_group_member_info",
@@ -372,7 +441,11 @@ class ReplyGuardPlugin(Star):
                         name = str(data.get("card") or data.get("nickname") or "")
                         if name:
                             wanted[qq] = name
-                            self._at_name_cache[cache_key] = name
+                            self._at_name_cache[f"{group_id}:{qq}"] = name
+
+            logger.info(
+                f"[reply_guard] @ 名称解析 {len([q for q in wanted if wanted[q]])}/{len(wanted)}"
+            )
 
         def apply(segments: list[MessageSegment]) -> None:
             for segment in segments:
@@ -562,13 +635,14 @@ class ReplyGuardPlugin(Star):
         nickname = str(sender.get("card") or sender.get("nickname") or "")
         user_id = str(sender.get("user_id") or "")
         segments, reply_id = self._parse_onebot_message(data)
+        _ = reply_id
         if not segments and not nickname:
             return None
         return QuoteMessage(
             user_id=user_id,
             nickname=nickname,
             segments=segments,
-            reply=await self._fetch_onebot_reply(event, reply_id, 1),
+            reply=None,
         )
 
     @staticmethod
