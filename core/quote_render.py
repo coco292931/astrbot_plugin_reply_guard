@@ -114,7 +114,6 @@ _EMOJI_CHAR_RE = re.compile(
     "\u2600-\u27BF"
     "\u2B00-\u2BFF"
     "\u2190-\u21FF"
-    "\uFE0F\u200D"
     "]"
 )
 
@@ -963,6 +962,11 @@ async def prepare_messages(
     def walk_reply(reply: ReplyMessage | None, depth: int = 0) -> ReplyMessage | None:
         if reply is None or depth > MAX_REPLY_DEPTH:
             return None
+        reply.nickname = reply.nickname or "匿名"
+        if not reply.segments:
+            reply.segments = [
+                MessageSegment(type="text", text=REPLY_UNAVAILABLE_TEXT)
+            ]
         reply.segments = list(reply.segments)
         for segment in reply.segments:
             register(segment, "_image", _segment_urls(segment))
@@ -1017,7 +1021,15 @@ def _s(value: float) -> float:
 
 
 def _circle_image(img: Any, size: int) -> Any:
-    img = img.convert("RGBA").resize((size, size), Image.LANCZOS)
+    """头像按中心裁成正方形再画圆（原版是 slice，不拉伸）。"""
+    img = img.convert("RGBA")
+    width, height = img.size
+    side = min(width, height)
+    if side > 0:
+        left = (width - side) // 2
+        top = (height - side) // 2
+        img = img.crop((left, top, left + side, top + side))
+    img = img.resize((size, size), Image.LANCZOS)
     mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))

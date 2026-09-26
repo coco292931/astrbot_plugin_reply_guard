@@ -26,6 +26,7 @@ from .core.quote_render import (
 
 PLUGIN_NAME = "astrbot_plugin_reply_guard"
 MAX_QUOTE_MESSAGES = 10
+MAX_REPLY_DEPTH = 3
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -92,7 +93,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.1.7",
+    "0.1.8",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -407,6 +408,26 @@ class ReplyGuardPlugin(Star):
         before = await self._fetch_previous_messages(event, reply_comp, count)
         return (before + [first])[-count:]
 
+    async def _fetch_onebot_reply(
+        self, event: AstrMessageEvent, message_id: str | None, depth: int
+    ) -> ReplyMessage | None:
+        """递归取被引用的消息，最多三层，取不到就写占位。"""
+        if not message_id or depth > MAX_REPLY_DEPTH:
+            return None
+        data = await self._fetch_onebot_message(event, message_id)
+        if not data:
+            return None
+        sender = data.get("sender") if isinstance(data.get("sender"), dict) else {}
+        nickname = str(sender.get("card") or sender.get("nickname") or "")
+        segments, reply_id = self._parse_onebot_message(data)
+        if not segments:
+            segments = [MessageSegment(type="text", text="[引用消息不可用]")]
+        return ReplyMessage(
+            nickname=nickname or "匿名",
+            segments=segments,
+            reply=await self._fetch_onebot_reply(event, reply_id, depth + 1),
+        )
+
     async def _build_quote_message(
         self, event: AstrMessageEvent, reply_comp
     ) -> QuoteMessage | None:
@@ -431,7 +452,8 @@ class ReplyGuardPlugin(Star):
                     sender.get("card") or sender.get("nickname") or nickname
                 )
                 user_id = str(sender.get("user_id") or user_id)
-                segments, reply = self._parse_onebot_message(data)
+                segments, reply_id = self._parse_onebot_message(data)
+                reply = await self._fetch_onebot_reply(event, reply_id, 1)
 
         if not segments and not nickname:
             return None
@@ -528,21 +550,25 @@ class ReplyGuardPlugin(Star):
 
         previous: list[QuoteMessage] = []
         for item in candidates:
-            message = self._onebot_to_quote(item)
+            message = await self._onebot_to_quote(event, item)
             if message is not None:
                 previous.append(message)
         return previous[-want:]
 
-    @staticmethod
-    def _onebot_to_quote(data: dict) -> QuoteMessage | None:
+    async def _onebot_to_quote(
+        self, event: AstrMessageEvent, data: dict
+    ) -> QuoteMessage | None:
         sender = data.get("sender") if isinstance(data.get("sender"), dict) else {}
         nickname = str(sender.get("card") or sender.get("nickname") or "")
         user_id = str(sender.get("user_id") or "")
-        segments, _reply = ReplyGuardPlugin._parse_onebot_message(data)
+        segments, reply_id = self._parse_onebot_message(data)
         if not segments and not nickname:
             return None
         return QuoteMessage(
-            user_id=user_id, nickname=nickname, segments=segments, reply=None
+            user_id=user_id,
+            nickname=nickname,
+            segments=segments,
+            reply=await self._fetch_onebot_reply(event, reply_id, 1),
         )
 
     @staticmethod
@@ -572,6 +598,12 @@ class ReplyGuardPlugin(Star):
             elif isinstance(comp, Reply):
                 nested_chain = list(getattr(comp, "chain", None) or [])
                 if not nested_chain:
+                    reply = ReplyMessage(
+                        nickname=str(getattr(comp, "sender_nickname", "") or ""),
+                        segments=[
+                            MessageSegment(type="text", text="[引用消息不可用]")
+                        ],
+                    )
                     continue
                 nested_segments, nested_reply = ReplyGuardPlugin._parse_astr_chain(
                     nested_chain
@@ -586,8 +618,9 @@ class ReplyGuardPlugin(Star):
     @staticmethod
     def _parse_onebot_message(
         data: dict,
-    ) -> tuple[list[MessageSegment], ReplyMessage | None]:
+    ) -> tuple[list[MessageSegment], str | None]:
         segments: list[MessageSegment] = []
+        reply_id: str | None = None
         raw = data.get("message")
         if isinstance(raw, str):
             text = raw.strip()
@@ -620,7 +653,9 @@ class ReplyGuardPlugin(Star):
                 qq = str(seg_data.get("qq") or "")
                 if qq:
                     segments.append(MessageSegment(type="at", id=qq))
-        return segments, None
+            elif seg_type == "reply":
+                reply_id = str(seg_data.get("id") or "") or None
+        return segments, reply_id
 
     # ------------------------------------------------------------ OneBot
 
