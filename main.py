@@ -153,6 +153,7 @@ class ReplyGuardPlugin(Star):
         self.quote_scope = _as_list(cfg.get("quote_scope"))
         self._at_name_cache: dict[str, str] = {}
         self._member_cache: dict[str, dict] = {}
+        self._last_window: list = []
 
     async def initialize(self) -> None:
         if self.enable_keyword_reply:
@@ -342,9 +343,26 @@ class ReplyGuardPlugin(Star):
                 }
                 for message in messages
             ]
+            window = []
+            for item in getattr(self, "_last_window", []) or []:
+                sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
+                window.append(
+                    {
+                        "message_id": item.get("message_id"),
+                        "message_seq": item.get("message_seq"),
+                        "time": item.get("time"),
+                        "user_id": sender.get("user_id"),
+                        "raw": str(item.get("raw_message") or "")[:60],
+                    }
+                )
             path = os.path.join(self.cache_dir, "last_quote.json")
             with open(path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=1)
+                json.dump(
+                    {"rendered": payload, "window": window},
+                    handle,
+                    ensure_ascii=False,
+                    indent=1,
+                )
         except Exception as e:
             logger.debug(f"[reply_guard] 写调试信息失败: {e}")
 
@@ -598,6 +616,7 @@ class ReplyGuardPlugin(Star):
         target_id = str(getattr(reply_comp, "id", "") or "")
         quoted_ts = _as_int(getattr(reply_comp, "time", 0), 0)
         stamped = [item for item in ordered if _as_int(item.get("time"), 0) > 0]
+        self._last_window = ordered[-30:]
         logger.info(
             "[reply_guard] 历史窗口: "
             + ", ".join(
