@@ -94,7 +94,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.2.0",
+    "0.2.1",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -498,7 +498,7 @@ class ReplyGuardPlugin(Star):
         if count <= 1:
             return [first]
 
-        before = await self._fetch_previous_messages(event, reply_comp, count)
+        before = await self._fetch_previous_messages(event, reply_comp, count, first)
         return (before + [first])[-count:]
 
     async def _fetch_onebot_reply(
@@ -534,9 +534,7 @@ class ReplyGuardPlugin(Star):
             segments, reply = self._parse_astr_chain(chain)
 
         if not segments and not reply:
-            data = await self._fetch_onebot_message(
-                event, getattr(reply_comp, "id", None)
-            )
+            data = await self._fetch_onebot_message(event, message_id or None)
             if data:
                 sender = (
                     data.get("sender") if isinstance(data.get("sender"), dict) else {}
@@ -545,6 +543,9 @@ class ReplyGuardPlugin(Star):
                     sender.get("card") or sender.get("nickname") or nickname
                 )
                 user_id = str(sender.get("user_id") or user_id)
+                message_id = str(data.get("message_id") or message_id)
+                # Reply.time 往往是当前那条命令的时间，优先用消息自己的时间
+                msg_time = _as_int(data.get("time"), msg_time)
                 segments, reply_id = self._parse_onebot_message(data)
                 reply = await self._fetch_onebot_reply(event, reply_id, 1)
 
@@ -555,12 +556,12 @@ class ReplyGuardPlugin(Star):
             nickname=nickname,
             segments=segments,
             reply=reply,
-            message_id=str(getattr(reply_comp, "id", "") or ""),
-            time=_as_int(getattr(reply_comp, "time", 0), 0),
+            message_id=message_id,
+            time=msg_time,
         )
 
     async def _fetch_previous_messages(
-        self, event: AstrMessageEvent, reply_comp, count: int
+        self, event: AstrMessageEvent, reply_comp, count: int, quoted: QuoteMessage
     ) -> list[QuoteMessage]:
         """取被引用消息之前的若干条，拼在它前面（被引用那条排最后）。"""
         want = max(0, count - 1)
@@ -572,14 +573,16 @@ class ReplyGuardPlugin(Star):
         client = self._get_client(event)
         if client is None:
             return []
-        if not str(getattr(reply_comp, "id", "") or "").strip():
+        target_id = quoted.message_id or str(getattr(reply_comp, "id", "") or "")
+        if not target_id:
             return []
 
+        # 多拉一点，靠 message_id 在窗口里定位被引用那条，再取它前面的
         try:
             result = await client.call_action(
                 "get_group_msg_history",
                 group_id=int(group_id),
-                count=max(int(count) * 3, 20),
+                count=min(max(int(count) * 10, 120), 200),
             )
         except Exception as e:
             logger.debug(f"[reply_guard] get_group_msg_history 失败: {e}")
@@ -615,7 +618,6 @@ class ReplyGuardPlugin(Star):
 
         target_id = str(getattr(reply_comp, "id", "") or "")
         quoted_ts = _as_int(getattr(reply_comp, "time", 0), 0)
-        stamped = [item for item in ordered if _as_int(item.get("time"), 0) > 0]
         self._last_window = ordered[-30:]
         logger.info(
             "[reply_guard] 历史窗口: "
@@ -627,30 +629,22 @@ class ReplyGuardPlugin(Star):
         )
 
         candidates: list[dict] = []
-        if quoted_ts and len(stamped) >= 2:
-            # 有时间和目标时间，直接按时间取更早的，最稳
+        start = -1
+        for index, item in enumerate(ordered):
+            if str(item.get("message_id") or "") == target_id:
+                start = index
+                break
+        if start >= 0:
+            candidates = ordered[max(0, start - want) : start]
+        elif quoted.time:
             candidates = [
                 item
-                for item in stamped
-                if _as_int(item.get("time"), 0) < quoted_ts
+                for item in ordered
+                if _as_int(item.get("time"), 0)
+                and _as_int(item.get("time"), 0) < quoted.time
             ][-want:]
-        if not candidates:
-            start = -1
-            for index, item in enumerate(ordered):
-                if str(item.get("message_id") or "") == target_id:
-                    start = index
-                    break
-            if start >= 0:
-                candidates = ordered[max(0, start - want) : start]
-            elif quoted_ts:
-                candidates = [
-                    item
-                    for item in ordered
-                    if _as_int(item.get("time"), 0)
-                    and _as_int(item.get("time"), 0) < quoted_ts
-                ][-want:]
-            else:
-                return []
+        else:
+            return []
 
         previous: list[QuoteMessage] = []
         for item in candidates:
