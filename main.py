@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import time
 from typing import Any, Iterable
 
@@ -64,6 +65,17 @@ def _as_list(value: Any) -> list[str]:
     return []
 
 
+_QUOTE_COMMAND_RE = re.compile(r"^[/／]?q(?:\s+(\d{1,2}))?$", re.IGNORECASE)
+
+
+def _parse_quote_command(text: str) -> int | None:
+    """认 /q、/q 3 这种写法，唤醒前缀有没有被剥掉都认。"""
+    match = _QUOTE_COMMAND_RE.match((text or "").strip())
+    if not match:
+        return None
+    return max(1, min(_as_int(match.group(1) or 1, 1), MAX_QUOTE_MESSAGES))
+
+
 def _flatten(config: dict) -> dict[str, Any]:
     """面板的分组配置拍平成 key_subkey。"""
     flat: dict[str, Any] = {}
@@ -80,7 +92,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.1.1",
+    "0.1.2",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -190,6 +202,15 @@ class ReplyGuardPlugin(Star):
 
             text = (event.message_str or "").strip()
 
+            # 0) 引用图：/q [数量]
+            if self.enable_quote and self._in_scope(event, self.quote_scope):
+                quote_count = _parse_quote_command(text)
+                if quote_count is not None:
+                    event.should_call_llm(False)
+                    async for result in self._quote_results(event, quote_count):
+                        yield result
+                    return
+
             # 1) 关键词精准匹配：命中就按表格回，且不进历史
             if self.enable_keyword_reply and self._in_scope(
                 event, self.keyword_scope
@@ -256,13 +277,7 @@ class ReplyGuardPlugin(Star):
 
     # ----------------------------------------------------------- 引用图 /q
 
-    @filter.command("q")
-    async def quote_command(self, event: AstrMessageEvent, count: int = 1):
-        if not self.enable_quote:
-            return
-        if not self._in_scope(event, self.quote_scope):
-            return
-
+    async def _quote_results(self, event: AstrMessageEvent, count: int):
         reply_comp = None
         for comp in event.get_messages():
             if isinstance(comp, Reply):
