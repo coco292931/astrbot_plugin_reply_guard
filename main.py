@@ -68,12 +68,16 @@ def _as_list(value: Any) -> list[str]:
     return []
 
 
-_QUOTE_COMMAND_RE = re.compile(r"^[/／]?q(?:\s+(\d{1,2}))?$", re.IGNORECASE)
+_QUOTE_COMMAND_RE = re.compile(r"^[/／]?q\s*(\d{1,2})?$", re.IGNORECASE)
+_QUOTE_COMMAND_TAIL_RE = re.compile(r"(?:^|\s)[/／]?q\s*(\d{1,2})?\s*$", re.IGNORECASE)
 
 
 def _parse_quote_command(text: str) -> int | None:
-    """认 /q、/q 3 这种写法，唤醒前缀有没有被剥掉都认。"""
-    match = _QUOTE_COMMAND_RE.match((text or "").strip())
+    """认 /q、/q 3、q3 这些写法，前面挂着 @ 或引用噪声也能认出来。"""
+    candidate = (text or "").strip()
+    if not candidate:
+        return None
+    match = _QUOTE_COMMAND_RE.match(candidate) or _QUOTE_COMMAND_TAIL_RE.search(candidate)
     if not match:
         return None
     return max(1, min(_as_int(match.group(1) or 1, 1), MAX_QUOTE_MESSAGES))
@@ -95,7 +99,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.2.4",
+    "0.2.5",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -165,6 +169,15 @@ class ReplyGuardPlugin(Star):
     # ------------------------------------------------------------------ 通用
 
     @staticmethod
+    def _typed_text(event: AstrMessageEvent) -> str:
+        """只取用户手打的纯文本，撇开 @、引用、图片这些组件。"""
+        parts: list[str] = []
+        for comp in event.get_messages():
+            if isinstance(comp, Plain):
+                parts.append(str(getattr(comp, "text", "") or ""))
+        return "".join(parts).strip()
+
+    @staticmethod
     def _in_scope(event: AstrMessageEvent, scope: Iterable[str]) -> bool:
         scope_list = list(scope or [])
         if not scope_list:
@@ -208,9 +221,9 @@ class ReplyGuardPlugin(Star):
 
             text = (event.message_str or "").strip()
 
-            # 0) 引用图：/q [数量]
+            # 0) 引用图：/q [数量]，只看手打的文本，免得被 @ 和引用带偏
             if self.enable_quote and self._in_scope(event, self.quote_scope):
-                quote_count = _parse_quote_command(text)
+                quote_count = _parse_quote_command(self._typed_text(event) or text)
                 if quote_count is not None:
                     event.should_call_llm(False)
                     async for result in self._quote_results(event, quote_count):
