@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import math
 import os
 import re
@@ -814,6 +815,24 @@ class ResourceLoader:
     async def _fetch(self, url: str) -> bytes | None:
         if not url:
             return None
+        # AstrBot 会把图片落到本地临时文件，这种直接读盘
+        if url.startswith("file://"):
+            try:
+                with open(url[7:], "rb") as handle:
+                    return handle.read()
+            except OSError as e:
+                logger.debug(f"[reply_guard] 读本地图片失败 {url}: {e}")
+                return None
+        if not url.lower().startswith(("http://", "https://", "data:image/")):
+            if os.path.isfile(url):
+                try:
+                    with open(url, "rb") as handle:
+                        return handle.read()
+                except OSError as e:
+                    logger.debug(f"[reply_guard] 读本地图片失败 {url}: {e}")
+                    return None
+            logger.debug(f"[reply_guard] 不认识的图片地址: {url}")
+            return None
         if url.lower().startswith("data:image/"):
             try:
                 import base64
@@ -961,7 +980,7 @@ def _parse_cq_string(text: str) -> tuple[list[MessageSegment], str | None]:
         for pair in match.group(2).split(","):
             if "=" in pair:
                 key, value = pair.split("=", 1)
-                params[key.strip()] = value.strip()
+                params[key.strip()] = html.unescape(value.strip())
 
         if code == "at":
             qq = str(params.get("qq") or "")

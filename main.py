@@ -99,7 +99,7 @@ def _flatten(config: dict) -> dict[str, Any]:
     PLUGIN_NAME,
     "coco",
     "群聊回复守卫：关键词精准回复 / 回复概率门 / 敏感词拦截 / 引用图",
-    "0.2.5",
+    "0.2.6",
     "https://github.com/coco292931/astrbot_plugin_reply_guard",
 )
 class ReplyGuardPlugin(Star):
@@ -177,6 +177,16 @@ class ReplyGuardPlugin(Star):
                 parts.append(str(getattr(comp, "text", "") or ""))
         return "".join(parts).strip()
 
+    def _command_candidate(self, event: AstrMessageEvent) -> str:
+        """命令判定用的文本：手打的优先，拿不到就把 @ 和方括号噪声剔掉。"""
+        typed = self._typed_text(event)
+        if typed:
+            return typed
+        text = (event.message_str or "").strip()
+        text = re.sub(r"@[^\s@]*\(\s*\d+\s*\)", " ", text)
+        text = re.sub(r"\[[^\]]*\]", " ", text)
+        return text.strip()
+
     @staticmethod
     def _in_scope(event: AstrMessageEvent, scope: Iterable[str]) -> bool:
         scope_list = list(scope or [])
@@ -223,7 +233,14 @@ class ReplyGuardPlugin(Star):
 
             # 0) 引用图：/q [数量]，只看手打的文本，免得被 @ 和引用带偏
             if self.enable_quote and self._in_scope(event, self.quote_scope):
-                quote_count = _parse_quote_command(self._typed_text(event) or text)
+                candidate = self._command_candidate(event)
+                quote_count = _parse_quote_command(candidate)
+                if "q" in candidate.lower() or "q" in text.lower():
+                    logger.info(
+                        "[reply_guard] /q 判定: "
+                        f"comps={[type(c).__name__ for c in event.get_messages()]} "
+                        f"typed={candidate!r} str={text!r} -> {quote_count}"
+                    )
                 if quote_count is not None:
                     event.should_call_llm(False)
                     async for result in self._quote_results(event, quote_count):
