@@ -156,6 +156,70 @@ def resolve_font_path(preferred: str = "") -> str:
     return ""
 
 
+_FALLBACK_HINTS = (
+    "dejavusans.ttf",
+    "dejavusansmono.ttf",
+    "notosanssymbols",
+    "notosanssc",
+    "notosanscjk",
+    "sourcehansans",
+    "wqy",
+    "droidsansfallback",
+    "symbola",
+)
+_fallback_cache: list[str] | None = None
+_glyph_cache: dict[tuple[str, str], bool] = {}
+
+
+def _resolve_fallback_fonts() -> list[str]:
+    """兜底字体：主字体没这个字的时候挨个问过去。"""
+    global _fallback_cache
+    if _fallback_cache is not None:
+        return _fallback_cache
+    found: list[str] = []
+    for root in _FONT_ROOTS:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                lower = name.lower()
+                if not lower.endswith((".ttf", ".otf")):
+                    continue
+                if any(hint in lower for hint in _FALLBACK_HINTS):
+                    path = os.path.join(dirpath, name)
+                    if path not in found:
+                        found.append(path)
+    _fallback_cache = found
+    return found
+
+
+def _glyph_ok(font_path: str, char: str) -> bool:
+    """这个字体有没有这个字：拿私用区字符的画法当缺字模板比一下。"""
+    if not font_path or not char:
+        return False
+    key = (font_path, char)
+    cached = _glyph_cache.get(key)
+    if cached is not None:
+        return cached
+    ok = True
+    try:
+        font = _load_font(font_path, 24)
+
+        def signature(ch: str):
+            mask = font.getmask(ch)
+            try:
+                return bytes(mask)
+            except Exception:
+                return mask.tobytes()
+
+        missing = signature("\ue0ff")
+        ok = signature(char) != missing or char == "\ue0ff"
+    except Exception:
+        ok = True
+    _glyph_cache[key] = ok
+    return ok
+
+
 def _load_font(font_path: str, size: float):
     px = max(1, int(round(size * OUTPUT_SCALE)))
     key = (font_path, px)
@@ -292,30 +356,46 @@ class FontManager:
     def __init__(self, font_path: str, emoji_font_path: str = "") -> None:
         self.font_path = font_path
         self.emoji_font_path = emoji_font_path or resolve_emoji_font_path()
+        self.fallback_paths = [
+            path for path in _resolve_fallback_fonts() if path != font_path
+        ]
 
-    def font(self, size: float):
-        return _load_font(self.font_path, size)
+    def font(self, size: float, path: str = ""):
+        return _load_font(path or self.font_path, size)
 
     @property
     def has_emoji_font(self) -> bool:
         return bool(self.emoji_font_path) and _load_emoji_font() is not None
 
-    @staticmethod
-    def runs(text: str) -> list[tuple[bool, str]]:
-        """按 emoji / 非 emoji 切段，方便分段换字体。"""
-        runs: list[tuple[bool, str]] = []
+    def pick_font(self, char: str) -> str:
+        """一个字用哪个字体画：emoji 走 emoji 字体，主字体缺字就走兜底。"""
+        if self.has_emoji_font and _EMOJI_CHAR_RE.match(char):
+            return self.emoji_font_path
+        if _glyph_ok(self.font_path, char):
+            return self.font_path
+        for path in self.fallback_paths:
+            if _glyph_ok(path, char):
+                return path
+        return self.font_path
+
+    def runs(self, text: str) -> list[tuple[str, str]]:
+        """按字体切段，返回 [(字体路径, 这一段文本)]。"""
+        runs: list[tuple[str, str]] = []
         for char in text:
-            is_emoji = bool(_EMOJI_CHAR_RE.match(char))
-            if runs and runs[-1][0] == is_emoji:
-                runs[-1] = (is_emoji, runs[-1][1] + char)
+            path = self.pick_font(char)
+            if runs and runs[-1][0] == path:
+                runs[-1] = (path, runs[-1][1] + char)
             else:
-                runs.append((is_emoji, char))
+                runs.append((path, char))
         return runs
 
-    def plain_measure(self, text: str, size: float) -> float:
+    def is_emoji_font(self, path: str) -> bool:
+        return bool(self.emoji_font_path) and path == self.emoji_font_path
+
+    def plain_measure(self, text: str, size: float, path: str = "") -> float:
         if not text:
             return 0.0
-        font = self.font(size)
+        font = self.font(size, path)
         try:
             return float(font.getlength(text)) / OUTPUT_SCALE
         except Exception:
@@ -324,14 +404,14 @@ class FontManager:
     def measure(self, text: str, size: float) -> float:
         if not text:
             return 0.0
-        if not self.has_emoji_font:
+        if not self.has_emoji_font and not self.fallback_paths:
             return self.plain_measure(text, size)
         total = 0.0
-        for is_emoji, chunk in self.runs(text):
-            if is_emoji:
+        for path, chunk in self.runs(text):
+            if self.is_emoji_font(path):
                 total += size * EMOJI_SCALE * len(chunk)
             else:
-                total += self.plain_measure(chunk, size)
+                total += self.plain_measure(chunk, size, path)
         return total
 
     def line_metrics(self, text: str, size: float) -> tuple[float, float, float]:
@@ -1147,19 +1227,14 @@ def _draw_text(
 ) -> None:
     if not text:
         return
-    font = fonts.font(size)
     try:
-        ascent, descent = font.getmetrics()
+        ascent, descent = fonts.font(size).getmetrics()
     except Exception:
         ascent, descent = 0, 0
 
-    if not fonts.has_emoji_font:
-        draw.text((_s(x), _s(baseline) - ascent), text, font=font, fill=_hex(color))
-        return
-
     cursor = x
-    for is_emoji, chunk in fonts.runs(text):
-        if is_emoji:
+    for path, chunk in fonts.runs(text):
+        if fonts.is_emoji_font(path):
             target = max(1, int(round(_s(size) * EMOJI_SCALE)))
             drawn = False
             for char in chunk:
@@ -1172,8 +1247,13 @@ def _draw_text(
                 drawn = True
             if drawn:
                 continue
-        draw.text((_s(cursor), _s(baseline) - ascent), chunk, font=font, fill=_hex(color))
-        cursor += fonts.plain_measure(chunk, size)
+        draw.text(
+            (_s(cursor), _s(baseline) - ascent),
+            chunk,
+            font=fonts.font(size, path),
+            fill=_hex(color),
+        )
+        cursor += fonts.plain_measure(chunk, size, path)
 
 
 def _draw_segments(
